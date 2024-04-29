@@ -1,0 +1,347 @@
+---
+title: "COVID-19 Analysis"
+author: "Alfonso Gutiérrez"
+date: "2024-04-28"
+output: pdf_document
+---
+
+# Introduction
+The objective of this analysis is to get some insights about the global pandemic we lived during 2019-2022. We are going to pass trough all the steps of the data analysis process and come up with some conclusions.
+
+The information used for this analysis were took from the John Hopkins University dataset in GitHub.
+
+# Libraries
+```{r}
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+```
+
+# First Step: Get the data
+
+Let's get the data from our URL
+```{r Get the data, message = FALSE}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_US.csv", 
+                "time_series_covid19_confirmed_global.csv", 
+                "time_series_covid19_deaths_US.csv", 
+                "time_series_covid19_deaths_global.csv")
+urls <- str_c(url_in, file_names)
+```
+
+Now let's read the data and see what we have.
+```{r import_data, message = FALSE}
+US_cases <- read_csv(urls[1])
+global_cases <- read_csv(urls[2])
+US_deaths <- read_csv(urls[3])
+global_deaths <- read_csv(urls[4])
+```
+
+After importing the data and saved it in different datasets, let's dig in and check the general structure of the data in order to tidying it. We'll delete non-necessary variables for our analysis, rename another ones and be sure that the four datasets uses the same lingo.
+
+```{r tidy_global}
+#Tidy up global cases
+global_cases <- global_cases %>% 
+  #mutate(across(-c(`Province/State`, `Country/Region`, Lat, Long), as.numeric)) %>% 
+  pivot_longer(
+    cols = -c(`Province/State`, `Country/Region`, Lat, Long), 
+    names_to = "date",
+    values_to = "cases"
+ ) %>%  
+ select(-c(Lat, Long))
+
+#Tidy up global deaths
+global_deaths <- global_deaths %>% 
+  pivot_longer(
+    cols = -c(`Province/State`, `Country/Region`, Lat, Long), 
+    names_to = "date",
+    values_to = "deaths"
+ ) %>%  
+ select(-c(Lat, Long))
+
+#Join cases and deaths into dataset "global"
+global <- global_cases %>% 
+  full_join(global_deaths) %>% 
+  rename(Country_Region = `Country/Region`,
+         Province_State = `Province/State`) %>% 
+  mutate(date = mdy(date))
+
+```
+Now that we created the global dataset, let's check some summary data and outliers
+
+```{r summary}
+summary(global)
+
+#After take a look at the summary, it looks like the minimum cases in the dataset is 0 which is weird since this virus circulated all around the world, let's consider this as an outlier and ignore it.
+global <- global %>% filter(cases > 0)
+summary(global)
+
+#I also checked the max cases to avoid any possible error with the data. The max value is the United States.
+
+```
+Now that we transform and tide the Global dataset, let's do the same for the United States files. Since it have a lot of columns we don't need, let's keep only the ones we want. Same process as the previous files.
+
+```{r transform US Data}
+
+US_cases <- US_cases %>% 
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases") %>% 
+  select(Admin2:cases) %>% 
+  mutate(date = mdy(date)) %>% 
+  select(-c(Lat, Long_))
+
+#While doing the tide of the deaths archive, I found roughly 3400 dates that failed to pass so I created a variable  parse_failed to take a look at them and decide wath to do
+US_deaths <- US_deaths %>% 
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date",
+               values_to = "deaths") %>% 
+  select(Admin2:deaths) %>% 
+  mutate(date = mdy(date), parse_failed = is.na(date)) %>% 
+  select(-c(Lat, Long_))
+
+#Let's check the parse_failed cases
+problem_dates <- filter(US_deaths, parse_failed)
+head(problem_dates)
+
+#There are missing data in those lines, there's no date so I'll remove this values
+US_deaths <- US_deaths %>%
+  filter(!is.na(date)) %>% 
+  select(-c(parse_failed))
+
+#Now let's merge both datasets
+US <- US_cases %>% 
+  full_join(US_deaths)
+
+
+```
+Let's create a variable combined_key into the global dataset so we can add population
+
+```{r add population}
+#Create Combined_Key column
+global <- global %>% 
+  unite("Combined_Key",
+        c(Province_State, Country_Region),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE)
+
+#Retrieve population info
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(uid_lookup_url) %>% 
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+
+#Merge with global dataset
+global <- global %>% 
+  left_join(uid, by = c("Province_State", "Country_Region")) %>% 
+  select(-c(UID, FIPS)) %>% 
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+global
+
+```
+
+# Visualize the data
+
+Now that we tide up our info and we are sure that there's not outliers or missing datam, let's start with a couple of visualizations and analysis of the info. Of course, we could do tons of different analysis with such a huge info but let's focus on some basics.
+
+```{r Group data}
+#By state
+US_by_state <- US %>%
+  group_by(Province_State, Country_Region, date) %>% 
+  summarize(cases = sum(cases), deaths = sum(deaths), 
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mil = deaths * 1000000 / Population) %>%
+  select(Province_State, Country_Region, date, 
+         cases, deaths, deaths_per_mil, Population) %>%
+  ungroup()
+
+#US Totals
+US_totals <- US_by_state %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mil = deaths * 1000000 / Population) %>%
+  select(Country_Region, date,
+         cases, deaths, deaths_per_mil, Population) %>%
+  ungroup()
+
+```
+Now let's visualize the data
+
+```{r visualizations}
+US_totals %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position="bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y = NULL)
+
+```
+
+```{r California visualization}
+state <- "California"
+US_by_state %>%
+  filter(Province_State == state) %>% 
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position="bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y = NULL)
+
+```
+
+Further analysis
+
+```{r new cases}
+max(US_totals$date)
+max(US_totals$deaths)
+
+#Creating new variables to see only new cases/deaths against the previous day
+US_by_state <- US_by_state %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+
+US_totals <- US_totals %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+
+#Visualize new cases and deaths in the US
+US_totals %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme(legend.position="bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y = NULL)
+
+
+```
+```{r new cases/deaths in California}
+#Visualize new cases and deaths in the US
+US_by_state %>%
+  filter(Province_State == state) %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme(legend.position="bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in California", y = NULL)
+
+
+```
+```{r }
+US_state_totals <- US_by_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases),
+            population = max(Population),
+            cases_per_thou = 1000 * cases / population,
+            deaths_per_thou = 1000 * deaths / population) %>%
+  filter(cases > 0, population > 0)
+
+#Worst states
+US_state_totals %>%
+    slice_max(deaths_per_thou, n = 10) %>% 
+select(deaths_per_thou, cases_per_thou, everything())
+
+#Best states handling the pandemic
+US_state_totals %>%
+    slice_min(deaths_per_thou, n = 10) %>% 
+select(deaths_per_thou, cases_per_thou, everything())
+
+```
+Let's create another visualization showing the number of cases from North America region (Mexico, US, Canada)
+
+```{r North America visualization}
+# Filter data for Mexico, Canada, and US
+filtered_data <- global %>%
+  filter(Country_Region %in% c("Mexico", "Canada", "US"))
+
+# Group by date and country, summarize total cases
+summarized_data <- filtered_data %>%
+  group_by(date, Country_Region) %>%
+  summarise(total_cases = sum(cases))
+
+
+ggplot(summarized_data, aes(x = date, y = total_cases, color = Country_Region)) +
+  geom_line() +
+  labs(title = "COVID-19 Cases in Mexico, Canada, and the US",
+       x = "Date",
+       y = "Total Cases",
+       color = "Country") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(labels = scales::comma)
+```
+As we can see on the last chart, the number of cases in the US were much more bigger than it's neighbors. Let's compare the number of cases in the US against the rest of the world
+
+```{r rest of the word vs US}
+# Filter data for the US and all other countries
+us_data <- global %>%
+  filter(Country_Region == "US")
+
+rest_of_world_data <- global %>%
+  filter(Country_Region != "US")
+
+# Summarize total cases for each date for the rest of the world
+rest_of_world_summarized <- rest_of_world_data %>%
+  group_by(date) %>%
+  summarise(total_cases = sum(cases))
+
+# Plot US cases vs rest of the world
+ggplot() +
+  geom_line(data = us_data, aes(x = date, y = cases, color = "US")) +
+  geom_line(data = rest_of_world_summarized, aes(x = date, y = total_cases, color = "Rest of World")) +
+  labs(title = "COVID-19 Cases: US vs Rest of World",
+       x = "Date",
+       y = "Total Cases",
+       color = "Region") +
+  scale_color_manual(values = c("US" = "blue", "Rest of World" = "red")) +
+  theme_minimal()
+```
+Around the 17% of total cases were in the United States which is a lot considering it's population compared with the rest of the world.
+
+# Modeling the data
+
+Now let's create a model to predict results for the future
+```{r modeling}
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = US_state_totals)
+summary(mod)
+
+#cases_per_thou is a statistically significant predictor of deaths_per_thou, as indicated by the very small p-value (9.76e-06). The positive coefficient for cases_per_thou suggests a positive association between the number of cases and the number of deaths per thousand. The model explains about 30.61% of the variability in the response data around its mean.
+```
+```{r prediction against real}
+#Create another dataset with prediction
+US_tot_w_pred <- US_state_totals %>% mutate(pred = predict(mod))
+US_tot_w_pred
+
+#Now let's plot real vs prediction
+US_tot_w_pred %>% ggplot() + 
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+```
+# Conclusion and bias considerations
+
+Given that COVID-19 was a pandemic that struck the entire world, the collection of data and its standardization became virtually impossible. The policies of each area, restrictions, and the strength of the health system, along with the economic resources of the nation, prevent us from having certainty about the true number of cases and deaths during the years the pandemic lasted.
+
+Even this brief analysis, which is based solely on the United States, is incapable of reflecting 100% of what happened in reality. Such a complex case, with so much bias in its data collection, must be analyzed in far more detail than was seen during the class. Moreover, it would be advisable to focus on even smaller territorial extensions in order to isolate some of the data.
+
+For example, although it seems obvious that the number of deaths is influenced by the number of cases, our model was unable to adjust in a more or less accurate manner to the data presented. This indicates that there are places where perhaps with a lower number of cases, more deaths occurred than in others with many more cases. This discrepancy suggests possible underlying problems such as poor data collection or inadequate prevention campaigns.
+
+There were places where people did not go to the hospital unless they were very ill, which, again, is a factor of social behavior that impacts data collection. Carrying out this exercise in class was very interesting, and it leaves me with a profound understanding of the complexity involved in analyzing databases of this magnitude.

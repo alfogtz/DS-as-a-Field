@@ -1,0 +1,292 @@
+---
+title: "NYPD Shooting Incidents Analysis"
+author: "Alfonso Gutierrez"
+date: "2024-03-31"
+output: pdf_document
+header-includes:
+  - \usepackage{graphicx}
+  - \usepackage{float}
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+#Introduction
+
+This report utilizes historical information from the New York City police department from 2006 to 2023. The goal of the report is to visualize trends over time across the five boroughs of the city. The database includes very useful information such as the time and coordinates of the incident, the race, age, and sex of both the victim and the perpetrator, and whether the incident resulted in an arrest or not. The report covers the cleaning of the information, visualization, and the creation of a model that helps us predict the number of fatalities according to the number of incidents at a given time.
+
+# Packages and libraries
+Here are all the packages and libraries I used for this analysis.
+```{r}
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("tinytex")) install.packages("tinytex")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("scales")) install.packages("scales")
+
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(dplyr)
+```
+# Data Preparation
+Our primary data source comprises the City of New York's dataset on shootings spanning from 2006 to 2023.
+```{r read the data}
+url_in <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+nypd_shootings <- read_csv(url_in)
+print(nypd_shootings, n = 15, width = Inf)
+
+```
+
+Selecting relevant columns for the analysis
+```{r}
+df_nypd <- select(nypd_shootings, INCIDENT_KEY, OCCUR_DATE, OCCUR_TIME, BORO, 
+                  STATISTICAL_MURDER_FLAG, PERP_AGE_GROUP, PERP_SEX, PERP_RACE, 
+                  VIC_AGE_GROUP, VIC_SEX, VIC_RACE)
+
+str(df_nypd)
+#When checking types, I detected that OCCUR_DATE were saved as char
+# Converting OCCUR_DATE from character to Date
+df_nypd$OCCUR_DATE <- as.Date(df_nypd$OCCUR_DATE, format = "%m/%d/%Y")
+#I'd like to know the last date we have
+last_date <- max(df_nypd$OCCUR_DATE, na.rm = TRUE)
+last_date
+#december 29th 2023
+
+```
+
+Creating a new column for perpetrator identification
+```{r}
+df_nypd$PERP_ID <- ifelse(is.na(df_nypd$PERP_SEX), 0, 1)
+```
+
+Summarizing the data by year and borough
+```{r}
+df_nypd$OCCUR_YEAR <- year(as.Date(df_nypd$OCCUR_DATE, format = "%m/%d/%Y"))
+yearly_incidents <- df_nypd %>%
+  group_by(OCCUR_YEAR, BORO) %>%
+  summarise(Total_Incidents = n(), .groups = 'drop')
+```
+
+# Data Analysis/Visualization
+Let's begin with a broad analysis and gradually narrow our focus, moving from the general to the specific.
+```{r incidents by borough, fig.width=10, fig.height=4}
+ggplot(yearly_incidents, aes(x = OCCUR_YEAR, y = Total_Incidents, group = BORO, color = BORO)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Yearly Number of Incidents by Borough", x = "Year", y = "Total Incidents") +
+  theme_minimal() +
+  theme(panel.grid.major.x = element_line(color = "grey80", linewidth = 0.5),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_line(color = "grey80", linewidth = 0.5)) +
+  scale_x_continuous(breaks = unique(yearly_incidents$OCCUR_YEAR))
+```
+In this first graph, we can see a slight downward trend from 2006 to 2020, where the number of incidents surged, possibly due to COVID.Let's group by year and borough now and summarize total murders
+```{r}
+murders_only <- df_nypd %>%
+  filter(STATISTICAL_MURDER_FLAG == TRUE)
+yearly_murders <- murders_only %>%
+  group_by(OCCUR_YEAR, BORO) %>%
+  summarise(Total_Murders = n(), .groups = 'drop')
+```
+
+Create the line chart for murders
+```{r Murders by borough,  fig.width=10, fig.height=4}
+ggplot(yearly_murders, aes(x = OCCUR_YEAR, y = Total_Murders, group = BORO, color = BORO)) +
+  geom_line() +  # Connect points with lines
+  geom_point() +  # Show individual points
+  labs(title = "Yearly Number of Murders by Borough",
+       subtitle = "This chart displays the annual trends in murder incidents across each borough.",
+       x = "Year",
+       y = "Total Murders") +
+  theme_minimal() +
+  theme(panel.grid.major.x = element_line(color = "grey80", linewidth = 0.5),
+        panel.grid.minor.x = element_blank(),  # Remove the minor grid lines
+        panel.grid.major.y = element_line(color = "grey80", linewidth = 0.5),
+        legend.position = "bottom",  # Adjust legend positioning for better visibility
+        plot.title = element_text(size = 16, face = "bold"),
+        plot.subtitle = element_text(size = 12)) +
+  scale_x_continuous(breaks = unique(yearly_murders$OCCUR_YEAR))  # One vertical line per year
+```
+Both the number of incidents and the number of murders share a similar trend, with a decline from 2006 to 2019, a surge in 2020, followed by a subsequent decrease, although still not returning to pre-pandemic levels.
+
+Given that the boroughs of the city have different populations, it's important to include this variable. Due to the current trend, this analysis will only consider the years 2020 to 2023, and we will use the latest estimate from the US Government Census of 2022 to conduct an analysis per 100,000 inhabitants.
+
+```{r Create 2020-2023 incidents per 100k people}
+#create population dataset
+borough_data <- data.frame(
+  BORO = c("MANHATTAN", "BROOKLYN", "QUEENS", "BRONX", "STATEN ISLAND"),
+  population = c(1597451, 2561225, 2252196, 1356476, 490687))
+
+#create a subset containing the years of interest
+df_2020_2023<- df_nypd %>%
+  filter(year(OCCUR_DATE) %in% c(2020, 2021, 2022, 2023))
+
+#join both datasets
+df_last_years <- df_2020_2023 %>% 
+  left_join(borough_data, by = c("BORO"))
+
+# Count incidents by borough and year
+incidents_per_borough_year <- df_last_years %>%
+  group_by(BORO, year = year(OCCUR_DATE)) %>%
+  summarise(incidents = n(), .groups = 'drop')
+
+# Calculate incidents per 100,000 people
+incidents_per_borough_year <- merge(incidents_per_borough_year, borough_data, by="BORO")
+incidents_per_borough_year$incidents_per_100k <- (incidents_per_borough_year$incidents / incidents_per_borough_year$population) * 100000
+
+# Calculate the yearly average across all boroughs
+yearly_avg <- incidents_per_borough_year %>%
+  group_by(year) %>%
+  summarise(nyc_avg_incidents_per_100k = mean(incidents_per_100k, na.rm = TRUE))
+
+# Merge this average back with the original data frame
+incidents_per_borough_year <- merge(incidents_per_borough_year, yearly_avg, by = "year")
+
+ggplot(incidents_per_borough_year, aes(x = year, y = incidents_per_100k, fill = BORO)) +
+  geom_col(position = "dodge") +
+  labs(title = "Incidents per 100,000 People by Borough and Year",
+       x = "Year",
+       y = "Incidents per 100,000 People",
+       fill = "Borough") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+We can glean intriguing insights regarding incidents per borough. However, how does this fare compared to the city's overall situation? To contextualize this, let's compute the average per 100,000 inhabitants for each year.
+
+```{r average per year}
+total_incidents_per_year <- df_last_years %>%
+  group_by(year = year(OCCUR_DATE)) %>%
+  summarise(total_incidents = n(), .groups = 'drop')
+
+total_nyc_population <- sum(borough_data$population) 
+total_incidents_per_year$incidents_per_100k <- (total_incidents_per_year$total_incidents / total_nyc_population) * 100000 
+
+ggplot(total_incidents_per_year, aes(x = year, y = incidents_per_100k)) +
+  geom_line(group = 1, color = "grey", size = 1.5) +
+  geom_point(color = "blue", size = 3) +
+  labs(title = "Total Incidents per 100,000 People Per Year in NYC",
+       x = "Year",
+       y = "Incidents per 100,000 People") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) 
+
+```
+```{r}
+# Create a summary table for each borough with the total number of incidents and the percentage resulting in murder
+borough_summary <- df_last_years %>%
+  group_by(BORO) %>%
+  summarise(
+    total_incidents = n(),
+    murders = sum(STATISTICAL_MURDER_FLAG, na.rm = TRUE),
+    murder_rate = (murders / total_incidents) * 100,
+    .groups = 'drop'  # this removes the automatic grouping that summarise() creates
+  )
+
+# Print the summary table
+print(borough_summary)
+```
+
+Analyzing the charts, we observe a decrease in incidents per 100k people across the city. However, a significant concern persists in the Bronx, where last year's incidents per 100k people were more than double the city average. It's crucial to delve deeper into the data specific to the Bronx for a comprehensive analysis.
+When talking about the murder rate, the Bronx is the second place.
+
+```{r analysis on victims - sex}
+# Summarize the data for victim sex
+bronx_data <- df_last_years %>%
+  filter(BORO == "BRONX")
+bronx_victim_sex <- bronx_data %>%
+  group_by(VIC_SEX) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  filter(VIC_SEX %in% c("M", "F"))  # Assuming the values are "M" and "F"
+
+# Calculate percentages
+bronx_victim_sex <- bronx_victim_sex %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Create a pie chart for victim sex with percentages
+ggplot(bronx_victim_sex, aes(x = "", y = count, fill = VIC_SEX)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), position = position_stack(vjust = 0.5)) +
+  labs(fill = "Victim Sex", title = "Proportion of Male vs Female Victims in the Bronx") +
+  theme_void()
+
+# Group by victim sex and calculate total incidents and murders
+bronx_victim_sex <- bronx_data %>%
+  group_by(VIC_SEX) %>%
+  summarise(
+    total_incidents = n(),
+    murders = sum(STATISTICAL_MURDER_FLAG, na.rm = TRUE),
+    murder_rate = (murders / total_incidents) * 100,
+    .groups = 'drop'
+  ) %>%
+  filter(VIC_SEX %in% c("M", "F"))
+
+# Print the table
+print(bronx_victim_sex)
+```
+Ninety point six percent of the victims were men. It can also be seen that the murder rate in the case of men was 22%, compared to 18% in the case of women. With the information available and the analysis conducted so far, there is no evidence to suggest that there are hate crimes targeting any particular gender.
+
+```{r analysis on victims - race}
+# Summarize the data for victim race
+bronx_victim_race <- bronx_data %>%
+  group_by(VIC_RACE) %>%
+  summarise(count = n(), .groups = 'drop')
+
+# Calculate percentages
+bronx_victim_race <- bronx_victim_race %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Create a pie chart for victim race with percentages
+ggplot(bronx_victim_race, aes(x = "", y = count, fill = VIC_RACE)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), position = position_stack(vjust = 0.5)) +
+  labs(fill = "Victim Race", title = "Proportion of Races Among Victims in the Bronx") +
+  theme_void()
+
+# Summarize the data for victim race
+bronx_victim_race <- bronx_data %>%
+  group_by(VIC_RACE) %>%
+  summarise(
+    total_incidents = n(),
+    murders = sum(STATISTICAL_MURDER_FLAG, na.rm = TRUE),
+    murder_rate = (murders / total_incidents) * 100,
+    .groups = 'drop'
+  )
+
+# Print the table
+print(bronx_victim_race)
+```
+In the case of the proportion of incidents by race, we can see that both the percentage and the murder rate coincide, being higher in two groups: Black and White Hispanic, which together account for over 80% of the incidents.
+
+# Model Fitting
+Fitting a model: Total Deaths as a function of Total Incidents
+```{r}
+aggregated_data <- df_nypd %>%
+  group_by(OCCUR_YEAR) %>%
+  summarise(Total_Incidents = n(), Total_Deaths = sum(STATISTICAL_MURDER_FLAG, na.rm = TRUE))
+
+model <- lm(Total_Deaths ~ Total_Incidents, data = aggregated_data)
+summary(model)
+```
+
+Plotting residuals to check for model assumptions
+```{r}
+plot(model$residuals)
+hist(model$residuals)
+plot(aggregated_data$Total_Incidents, aggregated_data$Total_Deaths)
+abline(model, col = "red")
+```
+The model has statistical significance, according to the p and R values, there are a strongh relation between number of incidents and murders. Homoscedasticity and normality assumptions are also true.
+
+# Conclusion and Bias consideration
+
+Analyzing such an extensive database from a city as large and diverse as New York represents a significant challenge. During this analysis, we progressively delved from the most general to the most specific.
+
+After identifying with data that the area with the most shootings in the city is the Bronx, we were able to gain a broader understanding of the victims of these incidents. Of course, the information could be further scrutinized, leading to new questions such as why these races are the most affected? Why is there such a marked variation in murder rates?
+
+Additionally, utilizing the complete dataset, an analysis could be conducted on specific areas within the borough and the times when historically more incidents have been recorded to bolster surveillance in those areas. While no internal bias was detected in the database, it cannot be ruled out that there may be bias in data collection or in the behavior of residents in each borough. For example, we do not know the number of incidents that were never reported, or if in some boroughs there is greater trust in the police, leading to the reporting of all incidents. Following this analysis, a definitive conclusion about the incidents in the city was not reached, but a deeper understanding was attained, prompting new questions for further analysis aimed at deriving actionable insights.
+
